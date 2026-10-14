@@ -12,5 +12,8 @@
   "type": "commonjs",
   "bin": {
     "packet": "./src/cli.js"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
   }
 }
