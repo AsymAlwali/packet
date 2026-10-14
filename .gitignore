@@ -28,3 +28,9 @@ packet-keys.json
 src/server.precloud.bak
 src/identity.backup.js
 src/server.js.precloud.bak
+
+# Packet SQLite databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal

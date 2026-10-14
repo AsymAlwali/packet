@@ -1,27 +1,13 @@
 const WebSocket = require("ws");
 const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
+const { createStorage } = require("./storage");
 
 const PORT = Number(process.env.PORT || 8787);
-const DB = path.join(__dirname, "../packet-db.json");
-const KEYS = path.join(__dirname, "../packet-keys.json");
+const STORAGE_FILE = process.env.PACKET_DB ||
+  path.join(__dirname, "../packet.sqlite");
 
-function readJSON(file, fallback) {
-  if (!fs.existsSync(file)) return fallback;
-  return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-function saveJSON(file, data) {
-  const temp = file + ".tmp";
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2), {
-    mode: 0o600
-  });
-  fs.renameSync(temp, file);
-}
-
-const database = readJSON(DB, { messages: [] });
-const identities = readJSON(KEYS, {});
+const storage = createStorage(STORAGE_FILE);
 const clients = new Map();
 
 function send(socket, data) {
@@ -34,11 +20,7 @@ function deliver(username) {
   const socket = clients.get(username);
   if (!socket) return;
 
-  let changed = false;
-
-  for (const message of database.messages) {
-    if (message.to !== username || message.delivered) continue;
-
+  for (const message of storage.getPendingMessages(username)) {
     send(socket, {
       type: "chat.message",
       id: message.id,
@@ -51,7 +33,6 @@ function deliver(username) {
     // Keep pending so it can be retried on reconnect.
   }
 
-  if (changed) saveJSON(DB, database);
 }
 
 const server = new WebSocket.Server({
@@ -136,8 +117,8 @@ server.on("connection", (socket) => {
       });
 
       if (
-        identities[name] &&
-        identities[name] !== normalized
+        storage.getIdentity(name) &&
+        storage.getIdentity(name) !== normalized
       ) {
         send(socket, {
           type: "error",
@@ -222,9 +203,15 @@ server.on("connection", (socket) => {
         return;
       }
 
-      if (!identities[name]) {
-        identities[name] = pending.publicKey;
-        saveJSON(KEYS, identities);
+      try {
+        storage.registerIdentity(name, pending.publicKey);
+      } catch {
+        send(socket, {
+          type: "error",
+          message: "Identity registration failed"
+        });
+        socket.close();
+        return;
       }
 
       username = name;
@@ -276,8 +263,7 @@ server.on("connection", (socket) => {
         delivered: false
       };
 
-      database.messages.push(message);
-      saveJSON(DB, database);
+      storage.saveMessage(message);
 
       send(socket, {
         type: "queued",
@@ -290,14 +276,10 @@ server.on("connection", (socket) => {
     }
 
     if (packet.type === "chat.ack") {
-      const message = database.messages.find(
-        m => m.id === packet.id && m.to === username
-      );
+      if (typeof packet.id !== "string") return;
 
-      if (message && !message.delivered) {
-        message.delivered = true;
-        saveJSON(DB, database);
-        console.log("✓ Acknowledged:", message.id);
+      if (storage.acknowledgeMessage(packet.id, username)) {
+        console.log("✓ Acknowledged:", packet.id);
       }
       return;
     }
@@ -305,9 +287,7 @@ server.on("connection", (socket) => {
     if (packet.type === "inbox") {
       send(socket, {
         type: "inbox",
-        messages: database.messages.filter(
-          message => message.to === username
-        )
+        messages: storage.getInbox(username)
       });
     }
   });
