@@ -171,7 +171,7 @@ switch (command) {
       () => {
         console.log(`📦 Listening as @${username()}`);
       },
-      (packet) => {
+      (packet, socket) => {
         if (packet.type === "chat.message") {
           console.log(`📨 @${packet.from}: ${packet.text}`);
           socket.send(JSON.stringify({
@@ -256,7 +256,7 @@ switch (command) {
           rl.prompt();
         });
       },
-      (packet) => {
+      (packet, socket) => {
         if (packet.type === "chat.message") {
           console.log(`\n@${packet.from}> ${packet.text}`);
           socket.send(JSON.stringify({
