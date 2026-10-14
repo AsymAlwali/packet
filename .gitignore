@@ -34,3 +34,5 @@ src/server.js.precloud.bak
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite-journal
+
+.env.local
