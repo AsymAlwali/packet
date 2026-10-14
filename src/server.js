@@ -1,48 +1,40 @@
 const WebSocket = require("ws");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
 const PORT = Number(process.env.PORT || 8787);
 const DB = path.join(__dirname, "../packet-db.json");
+const KEYS = path.join(__dirname, "../packet-keys.json");
 
-let database = { messages: [] };
-
-if (fs.existsSync(DB)) {
-  try {
-    database = JSON.parse(fs.readFileSync(DB, "utf8"));
-    if (!Array.isArray(database.messages)) {
-      throw new Error("Invalid database");
-    }
-  } catch (error) {
-    console.error("Cannot load Packet database:", error.message);
-    process.exit(1);
-  }
+function readJSON(file, fallback) {
+  if (!fs.existsSync(file)) return fallback;
+  return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-function save() {
-  const temporary = DB + ".tmp";
-  fs.writeFileSync(temporary, JSON.stringify(database, null, 2), {
+function saveJSON(file, data) {
+  const temp = file + ".tmp";
+  fs.writeFileSync(temp, JSON.stringify(data, null, 2), {
     mode: 0o600
   });
-  fs.renameSync(temporary, DB);
+  fs.renameSync(temp, file);
 }
 
+const database = readJSON(DB, { messages: [] });
+const identities = readJSON(KEYS, {});
 const clients = new Map();
 
-const server = new WebSocket.Server({
-  port: PORT,
-  host: "127.0.0.1"
-});
-
-function send(socket, packet) {
+function send(socket, data) {
   if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(packet));
+    socket.send(JSON.stringify(data));
   }
 }
 
 function deliver(username) {
   const socket = clients.get(username);
   if (!socket) return;
+
+  let changed = false;
 
   for (const message of database.messages) {
     if (message.to !== username || message.delivered) continue;
@@ -55,15 +47,26 @@ function deliver(username) {
       timestamp: message.timestamp
     });
 
-    // Marked as sent, not yet confirmed by the recipient.
     message.delivered = true;
+    changed = true;
   }
 
-  save();
+  if (changed) saveJSON(DB, database);
 }
+
+const server = new WebSocket.Server({
+  host: "127.0.0.1",
+  port: PORT,
+  maxPayload: 16384
+});
 
 server.on("connection", (socket) => {
   let username = null;
+  let pending = null;
+
+  const timer = setTimeout(() => {
+    if (!username) socket.close(1008, "Authentication timeout");
+  }, 15000);
 
   socket.on("message", (raw) => {
     let packet;
@@ -78,7 +81,15 @@ server.on("connection", (socket) => {
       return;
     }
 
-    if (packet.type === "register") {
+    if (packet.type === "auth.begin") {
+      if (username || pending) {
+        send(socket, {
+          type: "error",
+          message: "Authentication already started"
+        });
+        return;
+      }
+
       const name = packet.username;
 
       if (
@@ -92,7 +103,10 @@ server.on("connection", (socket) => {
         return;
       }
 
-      if (clients.has(name) && clients.get(name) !== socket) {
+      if (
+        clients.has(name) &&
+        clients.get(name) !== socket
+      ) {
         send(socket, {
           type: "error",
           message: "Username already connected"
@@ -100,33 +114,145 @@ server.on("connection", (socket) => {
         return;
       }
 
-      if (username && clients.get(username) === socket) {
-        clients.delete(username);
+      let publicKey;
+
+      try {
+        publicKey = crypto.createPublicKey(packet.publicKey);
+
+        if (publicKey.asymmetricKeyType !== "ed25519") {
+          throw new Error("Expected Ed25519 key");
+        }
+      } catch {
+        send(socket, {
+          type: "error",
+          message: "Invalid public key"
+        });
+        return;
+      }
+
+      const normalized = publicKey.export({
+        type: "spki",
+        format: "pem"
+      });
+
+      if (
+        identities[name] &&
+        identities[name] !== normalized
+      ) {
+        send(socket, {
+          type: "error",
+          message: "Username belongs to another identity"
+        });
+        return;
+      }
+
+      pending = {
+        username: name,
+        publicKey: normalized,
+        challenge: crypto.randomBytes(32).toString("hex"),
+        expires: Date.now() + 10000
+      };
+
+      send(socket, {
+        type: "auth.challenge",
+        challenge: pending.challenge
+      });
+
+      return;
+    }
+
+    if (packet.type === "auth.prove") {
+      if (!pending || username) {
+        send(socket, {
+          type: "error",
+          message: "No pending authentication"
+        });
+        return;
+      }
+
+      if (Date.now() > pending.expires) {
+        pending = null;
+        send(socket, {
+          type: "error",
+          message: "Challenge expired"
+        });
+        socket.close();
+        return;
+      }
+
+      let valid = false;
+
+      try {
+        const signature = Buffer.from(
+          packet.signature,
+          "base64"
+        );
+
+        valid = crypto.verify(
+          null,
+          Buffer.from(pending.challenge),
+          pending.publicKey,
+          signature
+        );
+      } catch {
+        valid = false;
+      }
+
+      if (!valid) {
+        pending = null;
+        send(socket, {
+          type: "error",
+          message: "Invalid signature"
+        });
+        socket.close();
+        return;
+      }
+
+      const name = pending.username;
+
+      if (
+        clients.has(name) &&
+        clients.get(name) !== socket
+      ) {
+        send(socket, {
+          type: "error",
+          message: "Username already connected"
+        });
+        socket.close();
+        return;
+      }
+
+      if (!identities[name]) {
+        identities[name] = pending.publicKey;
+        saveJSON(KEYS, identities);
       }
 
       username = name;
+      pending = null;
+      clearTimeout(timer);
+
       clients.set(username, socket);
 
       send(socket, {
-        type: "registered",
+        type: "authenticated",
         username
       });
 
       deliver(username);
 
-      console.log(`📦 @${username} connected`);
+      console.log(`🔐 @${username} authenticated`);
+      return;
+    }
+
+    if (!username) {
+      send(socket, {
+        type: "error",
+        message: "Authentication required"
+      });
       return;
     }
 
     if (packet.type === "chat.message") {
-      if (!username) {
-        send(socket, {
-          type: "error",
-          message: "Register first"
-        });
-        return;
-      }
-
       if (
         typeof packet.to !== "string" ||
         !/^[a-zA-Z0-9_-]{1,32}$/.test(packet.to) ||
@@ -136,13 +262,13 @@ server.on("connection", (socket) => {
       ) {
         send(socket, {
           type: "error",
-          message: "Invalid recipient or message"
+          message: "Invalid message"
         });
         return;
       }
 
       const message = {
-        id: require("crypto").randomUUID(),
+        id: crypto.randomUUID(),
         from: username,
         to: packet.to,
         text: packet.text,
@@ -151,7 +277,7 @@ server.on("connection", (socket) => {
       };
 
       database.messages.push(message);
-      save();
+      saveJSON(DB, database);
 
       send(socket, {
         type: "queued",
@@ -164,26 +290,18 @@ server.on("connection", (socket) => {
     }
 
     if (packet.type === "inbox") {
-      if (!username) {
-        send(socket, {
-          type: "error",
-          message: "Register first"
-        });
-        return;
-      }
-
-      const messages = database.messages.filter(
-        (message) => message.to === username
-      );
-
       send(socket, {
         type: "inbox",
-        messages
+        messages: database.messages.filter(
+          message => message.to === username
+        )
       });
     }
   });
 
   socket.on("close", () => {
+    clearTimeout(timer);
+
     if (username && clients.get(username) === socket) {
       clients.delete(username);
       console.log(`📦 @${username} disconnected`);
@@ -191,4 +309,4 @@ server.on("connection", (socket) => {
   });
 });
 
-console.log(`📦 Packet server running on 127.0.0.1:${PORT}`);
+console.log(`🔐 Packet authenticated server on 127.0.0.1:${PORT}`);

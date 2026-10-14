@@ -9,3 +9,11 @@ packet-db.json.tmp
 
 # Previous experimental implementations
 src/*.v02.js
+
+# Packet authentication registry
+packet-keys.json
+packet-keys.json.tmp
+
+# Temporary development scripts
+patch-auth.cjs
+src/*.v03.js

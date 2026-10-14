@@ -22,7 +22,11 @@ function config() {
 }
 
 function username() {
-  return process.env.PACKET_USER || config().username;
+  try {
+    return require("./identity").loadIdentity().username;
+  } catch {
+    return undefined;
+  }
 }
 
 function validName(name) {
@@ -30,13 +34,17 @@ function validName(name) {
     /^[a-zA-Z0-9_-]{1,32}$/.test(name);
 }
 
+
 function connect(onReady, onPacket) {
+  const identity = require("./identity").loadIdentity();
+
   const socket = new WebSocket(URL);
 
   socket.on("open", () => {
     socket.send(JSON.stringify({
-      type: "register",
-      username: username()
+      type: "auth.begin",
+      username: identity.username,
+      publicKey: identity.publicKey
     }));
   });
 
@@ -50,15 +58,31 @@ function connect(onReady, onPacket) {
       return;
     }
 
-    if (packet.type === "registered") {
+    if (packet.type === "auth.challenge") {
+      const signature =
+        require("./identity").signChallenge(packet.challenge);
+
+      socket.send(JSON.stringify({
+        type: "auth.prove",
+        signature
+      }));
+
+      return;
+    }
+
+    if (packet.type === "authenticated") {
       onReady(socket);
-    } else if (packet.type === "error") {
+      return;
+    }
+
+    if (packet.type === "error") {
       console.error("❌", packet.message);
       process.exitCode = 1;
       socket.close();
-    } else {
-      onPacket(packet, socket);
+      return;
     }
+
+    onPacket(packet, socket);
   });
 
   socket.on("error", (error) => {
