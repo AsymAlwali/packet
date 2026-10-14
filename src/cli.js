@@ -174,6 +174,10 @@ switch (command) {
       (packet) => {
         if (packet.type === "chat.message") {
           console.log(`📨 @${packet.from}: ${packet.text}`);
+          socket.send(JSON.stringify({
+            type: "chat.ack",
+            id: packet.id
+          }));
         }
       }
     );
@@ -255,6 +259,10 @@ switch (command) {
       (packet) => {
         if (packet.type === "chat.message") {
           console.log(`\n@${packet.from}> ${packet.text}`);
+          socket.send(JSON.stringify({
+            type: "chat.ack",
+            id: packet.id
+          }));
           process.stdout.write("you> ");
         }
 

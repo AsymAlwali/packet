@@ -17,3 +17,4 @@ packet-keys.json.tmp
 # Temporary development scripts
 patch-auth.cjs
 src/*.v03.js
+src/*.v041.js

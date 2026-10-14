@@ -47,8 +47,8 @@ function deliver(username) {
       timestamp: message.timestamp
     });
 
-    message.delivered = true;
-    changed = true;
+    // Wait for recipient acknowledgment.
+    // Keep pending so it can be retried on reconnect.
   }
 
   if (changed) saveJSON(DB, database);
@@ -286,6 +286,19 @@ server.on("connection", (socket) => {
       });
 
       deliver(packet.to);
+      return;
+    }
+
+    if (packet.type === "chat.ack") {
+      const message = database.messages.find(
+        m => m.id === packet.id && m.to === username
+      );
+
+      if (message && !message.delivered) {
+        message.delivered = true;
+        saveJSON(DB, database);
+        console.log("✓ Acknowledged:", message.id);
+      }
       return;
     }
 
