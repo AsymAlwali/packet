@@ -55,7 +55,7 @@ function deliver(username) {
 }
 
 const server = new WebSocket.Server({
-  host: process.env.HOST || "127.0.0.1",
+  host: process.env.HOST || "0.0.0.0",
   port: PORT,
   maxPayload: 16384
 });
@@ -322,4 +322,4 @@ server.on("connection", (socket) => {
   });
 });
 
-console.log(`🔐 Packet authenticated server on ${process.env.HOST || "127.0.0.1"}:${PORT}`);
+console.log(`🔐 Packet authenticated server on ${process.env.HOST || "0.0.0.0"}:${PORT}`);
