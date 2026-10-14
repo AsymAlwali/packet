@@ -1,26 +1,68 @@
 #!/usr/bin/env node
 
 const WebSocket = require("ws");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const readline = require("readline");
+
+const CONFIG_DIR = path.join(os.homedir(), ".packet");
+const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
 const URL = process.env.PACKET_SERVER || "ws://127.0.0.1:8787";
 
 const [command, ...args] = process.argv.slice(2);
 
-function connect(onOpen, onMessage) {
+function config() {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function username() {
+  return process.env.PACKET_USER || config().username;
+}
+
+function validName(name) {
+  return typeof name === "string" &&
+    /^[a-zA-Z0-9_-]{1,32}$/.test(name);
+}
+
+function connect(onReady, onPacket) {
   const socket = new WebSocket(URL);
 
-  socket.on("open", () => onOpen(socket));
+  socket.on("open", () => {
+    socket.send(JSON.stringify({
+      type: "register",
+      username: username()
+    }));
+  });
 
   socket.on("message", (raw) => {
+    let packet;
+
     try {
-      onMessage(JSON.parse(raw.toString()), socket);
+      packet = JSON.parse(raw.toString());
     } catch {
       console.error("Invalid server response");
+      return;
+    }
+
+    if (packet.type === "registered") {
+      onReady(socket);
+    } else if (packet.type === "error") {
+      console.error("❌", packet.message);
+      process.exitCode = 1;
+      socket.close();
+    } else {
+      onPacket(packet, socket);
     }
   });
 
   socket.on("error", (error) => {
-    console.error("❌ Connection failed:", error.message);
+    console.error("❌", error.message);
     process.exitCode = 1;
   });
 
@@ -30,91 +72,171 @@ function connect(onOpen, onMessage) {
 switch (command) {
   case "hello":
     console.log("📦 Hello from Packet!");
-    console.log("Communication where work happens.");
     break;
 
   case "server":
     require("./server");
     break;
 
-  case "listen": {
-    const username = args[0]?.replace(/^@/, "");
+  case "login": {
+    const name = args[0];
 
-    if (!username) {
-      console.error("Usage: packet listen <username>");
+    if (!validName(name)) {
+      console.error("Usage: packet login <username>");
+      process.exit(1);
+    }
+
+    fs.mkdirSync(CONFIG_DIR, {
+      recursive: true,
+      mode: 0o700
+    });
+
+    fs.writeFileSync(
+      CONFIG_FILE,
+      JSON.stringify({ username: name }, null, 2),
+      { mode: 0o600 }
+    );
+
+    console.log(`📦 Logged in locally as @${name}`);
+    break;
+  }
+
+  case "whoami":
+    console.log(username() ? `@${username()}` : "Not logged in");
+    break;
+
+  case "send": {
+    const to = args[0]?.replace(/^@/, "");
+    const text = args.slice(1).join(" ");
+
+    if (!validName(to) || !text.trim()) {
+      console.error('Usage: packet send <user> "message"');
+      process.exit(1);
+    }
+
+    if (!username()) {
+      console.error("Run: packet login <username>");
       process.exit(1);
     }
 
     connect(
       (socket) => {
         socket.send(JSON.stringify({
-          type: "register",
-          username
+          type: "chat.message",
+          to,
+          text
         }));
       },
-      (packet) => {
-        if (packet.type === "registered") {
-          console.log(`📦 Listening as @${packet.username}`);
-          console.log("Waiting for messages...\n");
-        }
-
-        if (packet.type === "chat.message") {
-          console.log(
-            `\n📨 @${packet.from}: ${packet.text}`
-          );
-        }
-
-        if (packet.type === "error") {
-          console.error("❌", packet.message);
+      (packet, socket) => {
+        if (packet.type === "queued") {
+          console.log(`📦 Message saved for @${packet.to}`);
+          socket.close();
         }
       }
     );
-
     break;
   }
 
-  case "send": {
-    const to = args[0]?.replace(/^@/, "");
-    const message = args.slice(1).join(" ");
+  case "listen": {
+    if (!username()) {
+      console.error("Run: packet login <username>");
+      process.exit(1);
+    }
 
-    if (!to || !message.trim()) {
+    connect(
+      () => {
+        console.log(`📦 Listening as @${username()}`);
+      },
+      (packet) => {
+        if (packet.type === "chat.message") {
+          console.log(`📨 @${packet.from}: ${packet.text}`);
+        }
+      }
+    );
+    break;
+  }
+
+  case "inbox": {
+    if (!username()) {
+      console.error("Run: packet login <username>");
+      process.exit(1);
+    }
+
+    connect(
+      (socket) => {
+        socket.send(JSON.stringify({ type: "inbox" }));
+      },
+      (packet, socket) => {
+        if (packet.type === "inbox") {
+          console.log(`\n📥 Inbox for @${username()}\n`);
+
+          if (!packet.messages.length) {
+            console.log("No messages yet.");
+          }
+
+          for (const message of packet.messages) {
+            console.log(
+              `@${message.from}: ${message.text}`
+            );
+          }
+
+          socket.close();
+        }
+      }
+    );
+    break;
+  }
+
+  case "chat": {
+    const to = args[0]?.replace(/^@/, "");
+
+    if (!validName(to) || !username()) {
       console.error(
-        'Usage: packet send <username> "message"'
+        "Usage: packet chat <user> (login first)"
       );
       process.exit(1);
     }
 
-    const sender = process.env.PACKET_USER || "anonymous";
-
-    let registered = false;
-
     const socket = connect(
-      (socket) => {
-        socket.send(JSON.stringify({
-          type: "register",
-          username: sender
-        }));
+      () => {
+        console.log(`📦 Chatting with @${to}`);
+        console.log("Type /exit to leave.\n");
+
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout,
+          prompt: "you> "
+        });
+
+        rl.prompt();
+
+        rl.on("line", (line) => {
+          if (line.trim() === "/exit") {
+            rl.close();
+            socket.close();
+            return;
+          }
+
+          if (line.trim()) {
+            socket.send(JSON.stringify({
+              type: "chat.message",
+              to,
+              text: line
+            }));
+          }
+
+          rl.prompt();
+        });
       },
-      (packet, socket) => {
-        if (packet.type === "registered" && !registered) {
-          registered = true;
-
-          socket.send(JSON.stringify({
-            type: "chat.message",
-            to,
-            text: message
-          }));
+      (packet) => {
+        if (packet.type === "chat.message") {
+          console.log(`\n@${packet.from}> ${packet.text}`);
+          process.stdout.write("you> ");
         }
 
-        if (packet.type === "delivered") {
-          console.log(`📦 Delivered to @${packet.to}`);
-          socket.close();
-        }
-
-        if (packet.type === "error") {
-          console.error("❌", packet.message);
-          process.exitCode = 1;
-          socket.close();
+        if (packet.type === "queued") {
+          console.log(`\n✓ Sent to @${packet.to}`);
+          process.stdout.write("you> ");
         }
       }
     );
@@ -122,22 +244,24 @@ switch (command) {
     break;
   }
 
-  case "help":
   case "--help":
+  case "help":
   default:
     console.log(`
-📦 Packet CLI v0.2
+📦 Packet CLI v0.3
 
 Commands:
-  packet hello
+  packet login <username>
+  packet whoami
   packet server
-  packet listen <username>
-  packet send <username> "message"
+  packet send <user> "message"
+  packet listen
+  packet inbox
+  packet chat <user>
+  packet hello
 
 Environment:
-  PACKET_SERVER  WebSocket server URL
-  PACKET_USER    Your sender username
-
-Built for developers and AI agents.
+  PACKET_SERVER   Server WebSocket URL
+  PACKET_USER     Override local username
 `);
 }

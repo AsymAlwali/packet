@@ -2,3 +2,10 @@ node_modules/
 dist/
 .env
 *.log
+
+# Packet local data
+packet-db.json
+packet-db.json.tmp
+
+# Previous experimental implementations
+src/*.v02.js
