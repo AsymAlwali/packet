@@ -19,3 +19,4 @@ patch-auth.cjs
 src/*.v03.js
 src/*.v041.js
 src/*.v041.js
+src/identity.backup.js

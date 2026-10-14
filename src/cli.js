@@ -11,7 +11,23 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
 const URL = process.env.PACKET_SERVER || "ws://127.0.0.1:8787";
 
-const [command, ...args] = process.argv.slice(2);
+
+const argv = process.argv.slice(2);
+let selectedIdentity = null;
+
+if (argv[0] === "--as") {
+  selectedIdentity = argv[1];
+
+  if (!selectedIdentity) {
+    console.error("Usage: packet --as <identity> <command>");
+    process.exit(1);
+  }
+
+  argv.splice(0, 2);
+}
+
+const [command, ...args] = argv;
+
 
 function config() {
   try {
@@ -23,7 +39,7 @@ function config() {
 
 function username() {
   try {
-    return require("./identity").loadIdentity().username;
+    return require("./identity").loadIdentity(selectedIdentity).username;
   } catch {
     return undefined;
   }
@@ -36,7 +52,7 @@ function validName(name) {
 
 
 function connect(onReady, onPacket) {
-  const identity = require("./identity").loadIdentity();
+  const identity = require("./identity").loadIdentity(selectedIdentity);
 
   const socket = new WebSocket(URL);
 
@@ -60,7 +76,7 @@ function connect(onReady, onPacket) {
 
     if (packet.type === "auth.challenge") {
       const signature =
-        require("./identity").signChallenge(packet.challenge);
+        require("./identity").signChallenge(packet.challenge, selectedIdentity);
 
       socket.send(JSON.stringify({
         type: "auth.prove",
@@ -94,6 +110,44 @@ function connect(onReady, onPacket) {
 }
 
 switch (command) {
+
+  case "identity": {
+    const { createIdentity, listIdentities } =
+      require("./identity");
+
+    const action = args[0];
+
+    if (action === "create") {
+      const name = args[1];
+
+      if (!name) {
+        console.error("Usage: packet identity create <name>");
+        process.exit(1);
+      }
+
+      try {
+        createIdentity(name);
+        console.log(`📦 Identity @${name} created!`);
+      } catch (error) {
+        console.error("❌", error.message);
+        process.exitCode = 1;
+      }
+
+    } else if (action === "list") {
+      console.log("📦 Packet identities:");
+
+      for (const name of listIdentities()) {
+        console.log(`  @${name}`);
+      }
+
+    } else {
+      console.log("Usage: packet identity create <name>");
+      console.log("       packet identity list");
+    }
+
+    break;
+  }
+
   case "hello":
     console.log("📦 Hello from Packet!");
     break;
