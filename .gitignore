@@ -20,3 +20,11 @@ src/*.v03.js
 src/*.v041.js
 src/*.v041.js
 src/identity.backup.js
+
+# Packet local data and secrets
+.packet/
+packet-db.json
+packet-keys.json
+src/server.precloud.bak
+src/identity.backup.js
+src/server.js.precloud.bak
