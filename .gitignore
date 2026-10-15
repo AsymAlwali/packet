@@ -37,3 +37,5 @@ src/server.js.precloud.bak
 
 .env.local
 .packet-relay.env
+.vercel
+.env*
