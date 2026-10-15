@@ -55,9 +55,23 @@ async function deliver(username) {
   }
 }
 
+const express = require("express");
+const http = require("node:http");
+
+const app = express();
+
+app.get("*health", (req, res) => {
+  res.json({
+    name: "Packet",
+    status: "ok",
+    version: "0.1"
+  });
+});
+
+const httpServer = http.createServer(app);
+
 const server = new WebSocket.Server({
-  host: process.env.HOST || "0.0.0.0",
-  port: PORT,
+  server: httpServer,
   maxPayload: 16384
 });
 
@@ -337,7 +351,13 @@ server.on("connection", (socket) => {
   });
 });
 
-console.log(`🔐 Packet authenticated server on ${process.env.HOST || "0.0.0.0"}:${PORT}`);
+if (require.main === module) {
+  httpServer.listen(PORT, process.env.HOST || "0.0.0.0", () => {
+    console.log("📦 Packet listening on port " + PORT);
+  });
+}
+
+module.exports = httpServer;
 
 const reconciliationTimer = setInterval(() => {
   for (const username of clients.keys()) {
