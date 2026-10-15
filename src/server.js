@@ -1,28 +1,21 @@
 const WebSocket = require("ws");
 const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
+const { createStorage } = require("./storage");
 
 const PORT = Number(process.env.PORT || 8787);
-const DB = path.join(__dirname, "../packet-db.json");
-const KEYS = path.join(__dirname, "../packet-keys.json");
+const STORAGE_FILE = process.env.PACKET_DB ||
+  path.join(__dirname, "../packet.sqlite");
 
-function readJSON(file, fallback) {
-  if (!fs.existsSync(file)) return fallback;
-  return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-function saveJSON(file, data) {
-  const temp = file + ".tmp";
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2), {
-    mode: 0o600
-  });
-  fs.renameSync(temp, file);
-}
-
-const database = readJSON(DB, { messages: [] });
-const identities = readJSON(KEYS, {});
+const storage =
+  process.env.PACKET_STORAGE === "convex"
+    ? require("./convex-storage").createConvexStorage(
+        process.env.CONVEX_SITE_URL,
+        process.env.PACKET_RELAY_SECRET
+      )
+    : createStorage(STORAGE_FILE);
 const clients = new Map();
+const delivering = new Set();
 
 function send(socket, data) {
   if (socket.readyState === WebSocket.OPEN) {
@@ -30,33 +23,55 @@ function send(socket, data) {
   }
 }
 
-function deliver(username) {
+async function deliver(username) {
+  if (delivering.has(username)) return;
+
   const socket = clients.get(username);
-  if (!socket) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-  let changed = false;
+  delivering.add(username);
 
-  for (const message of database.messages) {
-    if (message.to !== username || message.delivered) continue;
+  try {
+    const messages = await storage.getPendingMessages(username);
 
-    send(socket, {
-      type: "chat.message",
-      id: message.id,
-      from: message.from,
-      text: message.text,
-      timestamp: message.timestamp
-    });
+    for (const message of messages) {
+      if (
+        clients.get(username) !== socket ||
+        socket.readyState !== WebSocket.OPEN
+      ) {
+        break;
+      }
 
-    // Wait for recipient acknowledgment.
-    // Keep pending so it can be retried on reconnect.
+      send(socket, {
+        type: "chat.message",
+        id: message.id,
+        from: message.from,
+        text: message.text,
+        timestamp: message.timestamp
+      });
+    }
+  } finally {
+    delivering.delete(username);
   }
-
-  if (changed) saveJSON(DB, database);
 }
 
+const express = require("express");
+const http = require("node:http");
+
+const app = express();
+
+app.get("*health", (req, res) => {
+  res.json({
+    name: "Packet",
+    status: "ok",
+    version: "0.1"
+  });
+});
+
+const httpServer = http.createServer(app);
+
 const server = new WebSocket.Server({
-  host: process.env.HOST || "0.0.0.0",
-  port: PORT,
+  server: httpServer,
   maxPayload: 16384
 });
 
@@ -68,7 +83,22 @@ server.on("connection", (socket) => {
     if (!username) socket.close(1008, "Authentication timeout");
   }, 15000);
 
+  let queue = Promise.resolve();
+
   socket.on("message", (raw) => {
+    queue = queue.then(
+      () => handlePacket(raw)
+    ).catch(error => {
+      console.error("Packet handler error:", error);
+      send(socket, {
+        type: "error",
+        message: "Internal server error"
+      });
+      socket.close();
+    });
+  });
+
+  async function handlePacket(raw) {
     let packet;
 
     try {
@@ -136,8 +166,8 @@ server.on("connection", (socket) => {
       });
 
       if (
-        identities[name] &&
-        identities[name] !== normalized
+        (await storage.getIdentity(name)) &&
+        (await storage.getIdentity(name)) !== normalized
       ) {
         send(socket, {
           type: "error",
@@ -222,9 +252,15 @@ server.on("connection", (socket) => {
         return;
       }
 
-      if (!identities[name]) {
-        identities[name] = pending.publicKey;
-        saveJSON(KEYS, identities);
+      try {
+        await storage.registerIdentity(name, pending.publicKey);
+      } catch {
+        send(socket, {
+          type: "error",
+          message: "Identity registration failed"
+        });
+        socket.close();
+        return;
       }
 
       username = name;
@@ -238,7 +274,7 @@ server.on("connection", (socket) => {
         username
       });
 
-      deliver(username);
+      await deliver(username);
 
       console.log(`🔐 @${username} authenticated`);
       return;
@@ -276,8 +312,7 @@ server.on("connection", (socket) => {
         delivered: false
       };
 
-      database.messages.push(message);
-      saveJSON(DB, database);
+      await storage.saveMessage(message);
 
       send(socket, {
         type: "queued",
@@ -285,19 +320,15 @@ server.on("connection", (socket) => {
         id: message.id
       });
 
-      deliver(packet.to);
+      await deliver(packet.to);
       return;
     }
 
     if (packet.type === "chat.ack") {
-      const message = database.messages.find(
-        m => m.id === packet.id && m.to === username
-      );
+      if (typeof packet.id !== "string") return;
 
-      if (message && !message.delivered) {
-        message.delivered = true;
-        saveJSON(DB, database);
-        console.log("✓ Acknowledged:", message.id);
+      if (await storage.acknowledgeMessage(packet.id, username)) {
+        console.log("✓ Acknowledged:", packet.id);
       }
       return;
     }
@@ -305,12 +336,10 @@ server.on("connection", (socket) => {
     if (packet.type === "inbox") {
       send(socket, {
         type: "inbox",
-        messages: database.messages.filter(
-          message => message.to === username
-        )
+        messages: await storage.getInbox(username)
       });
     }
-  });
+  }
 
   socket.on("close", () => {
     clearTimeout(timer);
@@ -322,4 +351,23 @@ server.on("connection", (socket) => {
   });
 });
 
-console.log(`🔐 Packet authenticated server on ${process.env.HOST || "0.0.0.0"}:${PORT}`);
+if (require.main === module) {
+  httpServer.listen(PORT, process.env.HOST || "0.0.0.0", () => {
+    console.log("📦 Packet listening on port " + PORT);
+  });
+}
+
+module.exports = httpServer;
+
+const reconciliationTimer = setInterval(() => {
+  for (const username of clients.keys()) {
+    deliver(username).catch(error => {
+      console.error(
+        `Delivery reconciliation failed for @${username}:`,
+        error
+      );
+    });
+  }
+}, 3000);
+
+reconciliationTimer.unref();

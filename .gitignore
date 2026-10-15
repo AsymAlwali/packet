@@ -28,3 +28,47 @@ packet-keys.json
 src/server.precloud.bak
 src/identity.backup.js
 src/server.js.precloud.bak
+
+# Packet SQLite databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+
+.env.local
+.packet-relay.env
+.vercel
+.env*
+
+# Packet local files
+.packet-relay.env
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+*.bak
+*.backup
+*.before-*
+*.pre-*
+src/*.backup
+src/*.before-*
+src/*.pre-*
+.agents/
+.claude/
+skills-lock.json
+
+# Local development artifacts
+.agents/
+.claude/
+AGENTS.md
+CLAUDE.md
+skills-lock.json
+src/*.bak
+src/*.backup
+src/*.before-*
+src/*.pre-*
+src/server.pre-*
+convex/_generated/
+.packet-relay.env
+.env.local

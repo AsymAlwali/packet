@@ -56,6 +56,13 @@ function connect(onReady, onPacket) {
 
   const socket = new WebSocket(URL);
 
+  const { createMessageReceipts } = require("./message-receipts");
+  const dedup = createMessageReceipts(identity.username);
+
+  socket.on("close", () => {
+    dedup.close();
+  });
+
   socket.on("open", () => {
     socket.send(JSON.stringify({
       type: "auth.begin",
@@ -96,6 +103,19 @@ function connect(onReady, onPacket) {
       process.exitCode = 1;
       socket.close();
       return;
+    }
+
+    if (packet.type === "chat.message" &&
+        typeof packet.id === "string") {
+      if (dedup.isDuplicate(packet.id)) {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: "chat.ack",
+            id: packet.id
+          }));
+        }
+        return;
+      }
     }
 
     onPacket(packet, socket);
