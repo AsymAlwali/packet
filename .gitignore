@@ -36,3 +36,4 @@ src/server.js.precloud.bak
 *.sqlite-journal
 
 .env.local
+.packet-relay.env

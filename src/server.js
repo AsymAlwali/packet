@@ -7,8 +7,15 @@ const PORT = Number(process.env.PORT || 8787);
 const STORAGE_FILE = process.env.PACKET_DB ||
   path.join(__dirname, "../packet.sqlite");
 
-const storage = createStorage(STORAGE_FILE);
+const storage =
+  process.env.PACKET_STORAGE === "convex"
+    ? require("./convex-storage").createConvexStorage(
+        process.env.CONVEX_SITE_URL,
+        process.env.PACKET_RELAY_SECRET
+      )
+    : createStorage(STORAGE_FILE);
 const clients = new Map();
+const delivering = new Set();
 
 function send(socket, data) {
   if (socket.readyState === WebSocket.OPEN) {
@@ -16,23 +23,36 @@ function send(socket, data) {
   }
 }
 
-function deliver(username) {
+async function deliver(username) {
+  if (delivering.has(username)) return;
+
   const socket = clients.get(username);
-  if (!socket) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-  for (const message of storage.getPendingMessages(username)) {
-    send(socket, {
-      type: "chat.message",
-      id: message.id,
-      from: message.from,
-      text: message.text,
-      timestamp: message.timestamp
-    });
+  delivering.add(username);
 
-    // Wait for recipient acknowledgment.
-    // Keep pending so it can be retried on reconnect.
+  try {
+    const messages = await storage.getPendingMessages(username);
+
+    for (const message of messages) {
+      if (
+        clients.get(username) !== socket ||
+        socket.readyState !== WebSocket.OPEN
+      ) {
+        break;
+      }
+
+      send(socket, {
+        type: "chat.message",
+        id: message.id,
+        from: message.from,
+        text: message.text,
+        timestamp: message.timestamp
+      });
+    }
+  } finally {
+    delivering.delete(username);
   }
-
 }
 
 const server = new WebSocket.Server({
@@ -49,7 +69,22 @@ server.on("connection", (socket) => {
     if (!username) socket.close(1008, "Authentication timeout");
   }, 15000);
 
+  let queue = Promise.resolve();
+
   socket.on("message", (raw) => {
+    queue = queue.then(
+      () => handlePacket(raw)
+    ).catch(error => {
+      console.error("Packet handler error:", error);
+      send(socket, {
+        type: "error",
+        message: "Internal server error"
+      });
+      socket.close();
+    });
+  });
+
+  async function handlePacket(raw) {
     let packet;
 
     try {
@@ -117,8 +152,8 @@ server.on("connection", (socket) => {
       });
 
       if (
-        storage.getIdentity(name) &&
-        storage.getIdentity(name) !== normalized
+        (await storage.getIdentity(name)) &&
+        (await storage.getIdentity(name)) !== normalized
       ) {
         send(socket, {
           type: "error",
@@ -204,7 +239,7 @@ server.on("connection", (socket) => {
       }
 
       try {
-        storage.registerIdentity(name, pending.publicKey);
+        await storage.registerIdentity(name, pending.publicKey);
       } catch {
         send(socket, {
           type: "error",
@@ -225,7 +260,7 @@ server.on("connection", (socket) => {
         username
       });
 
-      deliver(username);
+      await deliver(username);
 
       console.log(`🔐 @${username} authenticated`);
       return;
@@ -263,7 +298,7 @@ server.on("connection", (socket) => {
         delivered: false
       };
 
-      storage.saveMessage(message);
+      await storage.saveMessage(message);
 
       send(socket, {
         type: "queued",
@@ -271,14 +306,14 @@ server.on("connection", (socket) => {
         id: message.id
       });
 
-      deliver(packet.to);
+      await deliver(packet.to);
       return;
     }
 
     if (packet.type === "chat.ack") {
       if (typeof packet.id !== "string") return;
 
-      if (storage.acknowledgeMessage(packet.id, username)) {
+      if (await storage.acknowledgeMessage(packet.id, username)) {
         console.log("✓ Acknowledged:", packet.id);
       }
       return;
@@ -287,10 +322,10 @@ server.on("connection", (socket) => {
     if (packet.type === "inbox") {
       send(socket, {
         type: "inbox",
-        messages: storage.getInbox(username)
+        messages: await storage.getInbox(username)
       });
     }
-  });
+  }
 
   socket.on("close", () => {
     clearTimeout(timer);
@@ -303,3 +338,16 @@ server.on("connection", (socket) => {
 });
 
 console.log(`🔐 Packet authenticated server on ${process.env.HOST || "0.0.0.0"}:${PORT}`);
+
+const reconciliationTimer = setInterval(() => {
+  for (const username of clients.keys()) {
+    deliver(username).catch(error => {
+      console.error(
+        `Delivery reconciliation failed for @${username}:`,
+        error
+      );
+    });
+  }
+}, 3000);
+
+reconciliationTimer.unref();
